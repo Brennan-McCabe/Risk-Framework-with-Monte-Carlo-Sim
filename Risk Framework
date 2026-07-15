@@ -1,0 +1,84 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+
+class GeneralRiskManager:
+    def __init__(self, tickers, start_date, end_date):
+        self.tickers = tickers
+        self.data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
+        self.returns = np.log(self.data / self.data.shift(1)).dropna()
+
+    def run_monte_carlo_var(self, portfolio_value, weights, days_ahead=252, simulations=10000, confidence_level=0.95):
+        """
+        Runs a correlated Monte Carlo simulation to calculate Portfolio VaR and CVaR.
+        """
+        # 1. Calculate historical parameters
+        mean_returns = self.returns.mean().values
+        cov_matrix = self.returns.cov().values
+        
+        # 2. Cholesky Decomposition to handle correlation between assets
+        # This creates a lower triangular matrix used to correlate our random shocks
+        L = np.linalg.cholesky(cov_matrix)
+        
+        num_assets = len(self.tickers)
+        simulated_portfolio_returns = np.zeros(simulations)
+        
+        # 3. Run the simulations
+        for i in range(simulations):
+            # Generate uncorrelated random daily shocks (normal distribution)
+            Z = np.random.normal(size=(days_ahead, num_assets))
+            
+            # Apply Cholesky matrix to correlate the random shocks
+            daily_correlated_returns = Z.dot(L.T)
+            
+            # Add the drift (mean return)
+            daily_simulated_returns = mean_returns + daily_correlated_returns
+            
+            # Calculate the total return of this specific simulation path
+            # (Product of daily returns)
+            path_returns = np.exp(np.sum(daily_simulated_returns, axis=0)) - 1
+            
+            # Calculate the weighted portfolio return for this path
+            simulated_portfolio_returns[i] = np.sum(path_returns * weights)
+            
+        # 4. Calculate final simulated portfolio values
+        simulated_end_values = portfolio_value * (1 + simulated_portfolio_returns)
+        
+        # 5. Extract VaR and Conditional VaR (Expected Shortfall)
+        percentile = (1 - confidence_level) * 100
+        var_threshold = np.percentile(simulated_end_values, percentile)
+        
+        # CVaR is the average of the losses that fall beyond the VaR threshold
+        worst_cases = simulated_end_values[simulated_end_values <= var_threshold]
+        cvar_threshold = worst_cases.mean()
+        
+        var_dollar_loss = portfolio_value - var_threshold
+        cvar_dollar_loss = portfolio_value - cvar_threshold
+        
+        return {
+            "Simulated Paths": simulations,
+            "Horizon (Days)": days_ahead,
+            "95% VaR ($)": round(var_dollar_loss, 2),
+            "95% CVaR ($)": round(cvar_dollar_loss, 2)
+        }
+
+# --- Usage Example ---
+if __name__ == "__main__":
+    assets = ["AAPL", "TLT", "BTC-USD"]
+    
+    # Using an equal-weight portfolio for this example
+    portfolio_weights = np.array([0.33, 0.33, 0.34]) 
+    initial_capital = 100000
+    
+    rm = GeneralRiskManager(assets, start_date="2020-01-01", end_date="2024-01-01")
+    
+    print("--- Running Monte Carlo Simulation... ---")
+    results = rm.run_monte_carlo_var(
+        portfolio_value=initial_capital, 
+        weights=portfolio_weights, 
+        days_ahead=30,      # Looking at risk over the next month
+        simulations=10000   # 10,000 alternate realities
+    )
+    
+    for key, value in results.items():
+        print(f"{key}: {value}")
